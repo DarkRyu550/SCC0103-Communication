@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">"Comunicação "</string>
+    <string name="identity_name">Nome</string>
+    <string name="identity_name_description">Seu nome, como você deseja que apareça às outras pessoas.</string>
+    <string name="name">Nome</string>
+    <string name="message">Mensagem</string>
+    <string name="send">Enviar</string>
+</resources>
