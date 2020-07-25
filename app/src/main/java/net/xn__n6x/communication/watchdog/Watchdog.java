@@ -221,23 +221,76 @@ public class Watchdog extends Service {
 
     protected void onPacketReceived(Packet p) {
         Id current = this.identity.getId();
-        if(!p.getTarget().equals(current))
+
+        Log.d("Watchdog", "Received packet:");
+        Log.d("Watchdog", "    * From: " + p.getSource());
+        Log.d("Watchdog", "    * To:   " + p.getTarget());
+        Log.d("Watchdog", "    * Len:  " + p.getPayload().length);
+
+        if(!p.getTarget().equals(current)) {
             /* Forward packets we don't know on. */
+            Log.d("Watchdog", "Re-forwarded packet.");
             this.router.forward(p, Router.DEFAULT_TIME_TO_LIVE);
-        else {
+        } else {
             /* And keep the ones that we should receive. */
+            Log.d("Watchdog", "Keeping inbound packet.");
             ArrayDeque<Packet> packets = this.inboundQueue.get(p.getSource());
             if(packets == null) {
                 packets = new ArrayDeque<>(1);
                 this.inboundQueue.put(p.getSource(), packets);
-
-                /* Notify the listeners. */
-                Optional.ofNullable(this.inboundListeners.get(p.getSource()))
-                    .ifPresent(list -> list.forEach(val -> val.onMessage(p.getSource())));
             }
 
             packets.addLast(p);
+
+            /* Notify the listeners. */
+            Optional.ofNullable(this.inboundListeners.get(p.getSource()))
+                .ifPresent(list -> list.forEach(val -> val.onMessage(p.getSource())));
         }
+    }
+
+    protected void onEstablishedConnectionToPeer(Socket peer)
+        throws WatchdogException, ExecutionException, InterruptedException {
+
+        this.executor.submit(() -> {
+            try {
+                WatchdogProtocol proto = new WatchdogProtocol(peer);
+                proto.sendMagic();
+                proto.sendString(this.watchdogState.toString());
+
+                Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
+
+                proto.getValidMagic().orElseThrow(missing);
+                State state;
+                try {
+                    state = State.valueOf(proto.getString().orElseThrow(missing));
+                } catch(IllegalArgumentException e) {
+                    throw new WatchdogException("Expected valid state string", e);
+                }
+
+                /* Check for state mismatches or coercions. */
+                switch(this.watchdogState) {
+                    case DISCOVERY:
+                    case TRANSMISSION:
+                        if(this.watchdogState != state && state != State.DOCKED)
+                            /* State mismatch. */
+                            throw new WatchdogException(
+                                  "Mismatched state: We're at "
+                                + this.watchdogState
+                                + " while they're at "
+                                + state);
+                        break;
+                    case DOCKED:
+                        /* State coercion. */
+                        this.watchdogState = state;
+                }
+
+                return new PeerExchangeResult(null, 0);
+            } catch(IOException e) {
+                return new PeerExchangeResult(new WatchdogException(e), 0);
+            } catch(WatchdogException e) {
+                return new PeerExchangeResult(e, 0);
+            }
+        }).get().unwrap();
     }
 
     protected void onTransmissionConnectionToPeer(Socket peer)
@@ -246,13 +299,10 @@ public class Watchdog extends Service {
         this.executor.submit(() -> {
             try {
                 WatchdogProtocol proto = new WatchdogProtocol(peer);
-                proto.sendMagic();
                 proto.sendId(this.identity.getId());
                 proto.sendString(this.macAddress);
 
                 Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
-
-                proto.getValidMagic().orElseThrow(missing);
                 Id other = proto.getId().orElseThrow(missing);
                 proto.getString().orElseThrow(missing);
 
@@ -265,6 +315,7 @@ public class Watchdog extends Service {
 
                     packets.add(p.get());
                 }
+                Log.d("Watchdog", "TRANSMISSION -> " + packets.size() + " packets");
 
                 proto.sendInt(packets.size());
                 for (Packet p : packets)
@@ -272,6 +323,8 @@ public class Watchdog extends Service {
 
                 /* Receive all the inbound packets from this peer. */
                 int inbound = proto.getInt().orElseThrow(missing);
+                Log.d("Watchdog", "TRANSMISSION <- " + inbound + " packets");
+
                 for (int i = 0; i < inbound; ++i)
                     this.onPacketReceived(proto.getValidPacket().orElseThrow(missing));
 
@@ -290,13 +343,10 @@ public class Watchdog extends Service {
         this.executor.submit(() -> {
             try {
                 WatchdogProtocol proto = new WatchdogProtocol(peer);
-                proto.sendMagic();
                 proto.sendId(this.identity.getId());
                 proto.sendString(this.macAddress);
 
                 Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
-
-                proto.getValidMagic().orElseThrow(missing);
                 Id other = proto.getId().orElseThrow(missing);
                 String mac = proto.getString().orElseThrow(missing);
 
@@ -320,7 +370,7 @@ public class Watchdog extends Service {
 
     protected void onConnectionChanged(WifiP2pInfo info) {
         if(info.groupOwnerAddress == null) {
-            Log.d("Watchdog", "Called onConnectionChanged() with null owner address");
+            Log.d("Watchdog", "Called onConnectionChanged() with null owner address, assuming disconnected.");
             return;
         }
 
@@ -336,6 +386,7 @@ public class Watchdog extends Service {
                         p = new Socket();
                         p.connect(new InetSocketAddress(info.groupOwnerAddress, TCP_PORT));
                     }
+
                     return new PeerConnectionResult(null, p);
                 } catch(IOException e) {
                     return new PeerConnectionResult(e, null);
@@ -343,8 +394,12 @@ public class Watchdog extends Service {
             }).get().unwrap();
             Log.d("Watchdog", "Connected to peer at: " + peer.getInetAddress());
 
+            /* Run the first checks. */
+            this.onEstablishedConnectionToPeer(peer);
+
             switch(this.watchdogState) {
                 case DISCOVERY:
+                    Log.d("Watchdog", "DISCOVERY # Running");
                     this.onDiscoveryConnectionToPeer(peer);
                     peer.close();
 
@@ -398,6 +453,7 @@ public class Watchdog extends Service {
 
                     break;
                 case TRANSMISSION:
+                    Log.d("Watchdog", "TRANSMISSION # Running");
                     this.onTransmissionConnectionToPeer(peer);
                     peer.close();
 
@@ -405,7 +461,7 @@ public class Watchdog extends Service {
                     if(!this.router.getTargetedReachablePeers().iterator().hasNext()) {
                         Log.d("Watchdog", "TRANSMISSION # Finished");
                         /* Try to change state to discovery. */
-                        next = this.discoveryQueue.removeFirst();
+                        next = this.discoveryQueue.pollFirst();
                         if (next != null) {
                             WifiP2pConfig config = new WifiP2pConfig();
                             config.deviceAddress = next;
@@ -435,8 +491,9 @@ public class Watchdog extends Service {
                         this.watchdogState = State.TRANSMISSION;
                         this.dropCurrentConnectionThenConnectTo(config);
                     }
+                    break;
                 case DOCKED:
-                    Assertions.fail("Connected to a peer while docked.");
+                    Assertions.fail("State has been coerced to DOCKED on connection.");
             }
         } catch(IOException | WatchdogException | InterruptedException | ExecutionException e) {
             e.printStackTrace();
@@ -454,8 +511,11 @@ public class Watchdog extends Service {
                     Watchdog.this.wifiManager.connect(
                         Watchdog.this.wifiChannel,
                         connection,
-                        null);
-                    Log.d("Watchdog", "Requested connection to " + connection.deviceAddress);
+                        this.dropConnectionHandler(
+                            () -> Log.d("Watchdog", "Requested connection to " + connection.deviceAddress),
+                            () -> this.dropCurrentConnectionThenConnectTo(connection)
+                        ));
+
                     return;
                 }
 
@@ -485,8 +545,11 @@ public class Watchdog extends Service {
                     /* Fire another search, so that we don't run out of events. */
                     Watchdog.this.wifiManager.discoverPeers(
                         Watchdog.this.wifiChannel,
-                        null);
-                    Log.d("Watchdog", "Started peer discovery");
+                        this.dropConnectionHandler(
+                            () -> Log.d("Watchdog", "Started peer discovery"),
+                            this::dropCurrentConnectionAndStartSearch
+                        ));
+
                     return;
                 }
 
@@ -615,7 +678,7 @@ public class Watchdog extends Service {
          * @return The data of the first message in the queue, if any. */
         public Optional<byte[]> tryReceive(Id from) {
             return Optional.ofNullable(Watchdog.this.inboundQueue.get(from))
-                .flatMap(queue -> Optional.ofNullable(queue.removeFirst()))
+                .flatMap(queue -> Optional.ofNullable(queue.pollFirst()))
                 .map(Packet::getPayload);
         }
 

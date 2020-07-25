@@ -3,7 +3,9 @@ package net.xn__n6x.communication.control;
 import net.xn__n6x.communication.identity.Id;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /** A data transmission packet. */
@@ -54,8 +56,11 @@ public class Packet {
      * end of the route this packet had to take. Use this if you are forwarding
      * the data in this packet to other devices. */
     public Packet tag(Id id) {
-        Id[] route = (Id[]) Stream.concat(Arrays.stream(this.route), Stream.of(id)).toArray();
-        return new Packet(this.source, route, this.target, this.payload);
+        ArrayList<Id> route = Stream.concat(Arrays.stream(this.route), Stream.of(id))
+            .collect(Collectors.toCollection(ArrayList::new));
+
+        /* please just lemme finish this */
+        return new Packet(this.source, route.toArray(new Id[] {}), this.target, this.payload);
     }
 
     public void intoBuffer(ByteBuffer data) {

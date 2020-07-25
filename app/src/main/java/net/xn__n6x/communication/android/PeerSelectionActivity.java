@@ -107,9 +107,9 @@ public class PeerSelectionActivity extends AppCompatActivity {
     }
 
     protected static class PeerSetEntryHolder extends RecyclerView.ViewHolder {
-        protected ImageView peerAvatar;
-        protected TextView peerDisplayName;
-        protected ConstraintLayout peerEntry;
+        protected final ImageView peerAvatar;
+        protected final TextView peerDisplayName;
+        protected final ConstraintLayout peerEntry;
 
         public PeerSetEntryHolder(@NonNull View itemView) {
             super(itemView);

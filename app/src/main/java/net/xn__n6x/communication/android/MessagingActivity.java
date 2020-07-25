@@ -6,13 +6,17 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.IBinder;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
+import androidx.constraintlayout.widget.ConstraintLayout;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import net.xn__n6x.communication.R;
 import net.xn__n6x.communication.identity.Id;
@@ -72,8 +76,8 @@ public class MessagingActivity extends AppCompatActivity {
         /* Update the UI and set it up. */
         this.setTitle(this.target.toString());
         this.send.setOnClickListener(this::onSendClicked);
-
-        /*sgView.setAdapter();*/
+        msgView.setAdapter(new MessagingEntrySetAdapter(this.messages));
+        msgView.setLayoutManager(new LinearLayoutManager(this));
 
         /* Bind to the watchdog. */
         Intent watchdog = new Intent(this, Watchdog.class);
@@ -114,15 +118,18 @@ public class MessagingActivity extends AppCompatActivity {
 
     /** When messages from our peer become available. */
     protected void onWatchdogMessage(Id source) {
-        Optional<byte[]> optMessage;
-        while((optMessage = this.watchdog.tryReceive(source)).isPresent()) {
-            byte[] msgBytes = optMessage.get();
-            String contents = StandardCharsets.UTF_8
-                .decode(ByteBuffer.wrap(msgBytes))
-                .toString();
-            Log.i("MessagingActivity", "Got " + contents);
-            this.messages.add(new Message(source, contents));
-        }
+        this.runOnUiThread(() -> {
+            Optional<byte[]> optMessage;
+            while ((optMessage = this.watchdog.tryReceive(source)).isPresent()) {
+                byte[] msgBytes = optMessage.get();
+                String contents = StandardCharsets.UTF_8
+                    .decode(ByteBuffer.wrap(msgBytes))
+                    .toString();
+                Log.i("MessagingActivity", "Got " + contents);
+                this.messages.add(new Message(source, contents));
+                this.msgView.setAdapter(new MessagingEntrySetAdapter(this.messages));
+            }
+        });
     }
 
     /** Sets up the activity upon connection to the Watchdog. */
@@ -141,6 +148,52 @@ public class MessagingActivity extends AppCompatActivity {
         public Message(Id sender, String content) {
             this.sender = sender;
             this.content = content;
+        }
+    }
+
+    protected static class MessagingEntrySetAdapter extends RecyclerView.Adapter<MessagingEntrySetHolder> {
+        protected final ArrayList<Message> messages;
+
+        protected MessagingEntrySetAdapter(ArrayList<Message> messages) {
+            this.messages = messages;
+        }
+
+        @NonNull
+        @Override
+        public MessagingEntrySetHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            View v = LayoutInflater.from(parent.getContext())
+                .inflate(viewType, parent, false);
+            return new MessagingEntrySetHolder(v);
+        }
+
+        @Override
+        public int getItemViewType(int position) {
+            return R.layout.layout_message;
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull MessagingEntrySetHolder holder, int position) {
+            Message message = messages.get(position);
+
+            holder.content.setText(message.content);
+            holder.sender.setText(message.sender.toString());
+        }
+
+        @Override
+        public int getItemCount() {
+            return this.messages.size();
+        }
+    }
+
+    protected static class MessagingEntrySetHolder extends RecyclerView.ViewHolder {
+        protected final TextView sender;
+        protected final TextView content;
+
+        public MessagingEntrySetHolder(@NonNull View itemView) {
+            super(itemView);
+
+            this.sender = Objects.requireNonNull(itemView.findViewById(R.id.messageSender), "Required view is null");
+            this.content = Objects.requireNonNull(itemView.findViewById(R.id.messageContent), "Required view is null");
         }
     }
 }
