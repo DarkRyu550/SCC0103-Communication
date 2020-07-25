@@ -120,6 +120,7 @@ public class MessagingActivity extends AppCompatActivity {
             String contents = StandardCharsets.UTF_8
                 .decode(ByteBuffer.wrap(msgBytes))
                 .toString();
+            Log.i("MessagingActivity", "Got " + contents);
             this.messages.add(new Message(source, contents));
         }
     }

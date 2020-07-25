@@ -24,7 +24,6 @@ import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -175,7 +174,7 @@ public class Watchdog extends Service {
         filter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION);
         this.registerReceiver(new BroadcastHandler(), filter);
 
-        Log.i("Watchdog", "Successful started the Watchdog service");
+        Log.i("Watchdog", "Successfully started the Watchdog service");
     }
 
     @Override
@@ -204,17 +203,19 @@ public class Watchdog extends Service {
             .collect(Collectors.toCollection(ArrayList::new));
         this.router.retain(reachable);
 
+        /* Re-register any devices we might've temporarily lost. */
+        devices.stream()
+            .filter(t -> this.macToId.containsKey(t.deviceAddress))
+            .map(t -> this.macToId.get(t.deviceAddress))
+            .forEach(t -> this.router.register(t));
+
         if(this.watchdogState == State.DOCKED && this.discoveryQueue.size() > 0) {
             /* If we're docked, connect to the first element. */
             WifiP2pConfig config = new WifiP2pConfig();
             config.deviceAddress = this.discoveryQueue.removeFirst();
 
-            Log.d("Watchdog", "Connecting to device " + config.deviceAddress);
             this.watchdogState = State.DISCOVERY;
-            this.wifiManager.connect(
-                this.wifiChannel,
-                config,
-                null);
+            this.dropCurrentConnectionThenConnectTo(config);
         }
     }
 
@@ -348,14 +349,22 @@ public class Watchdog extends Service {
                     peer.close();
 
                     /* Advance the state machine. */
-                    String next = this.discoveryQueue.removeFirst();
+                    String next = this.discoveryQueue.pollFirst();
+
+                    /* The next device may be repeated if the list changed while we were connecting. */
+                    while (next != null && this.macToId.containsKey(next))
+                        next = this.discoveryQueue.pollFirst();
+
                     if(next == null) {
+                        Log.d("Watchdog", "DISCOVERY # Finished");
                         /* We've finished discovering things. Fire all of the
                          * discovery finished listeners and then, if there are
                          * any targets for transmission, switch to transmission,
                          * otherwise dock ourselves. */
                         for(OnFinishedDiscovery listener : this.finishedDiscoveryListeners)
                             listener.onFinishedDiscovery(this.router.getReachablePeers());
+
+                        Log.d("Watchdog", "DISCOVERY # Triggered listeners.");
 
                         if (this.router.getTargetedReachablePeers().size() > 0) {
                             Id nextId = this.router.getTargetedReachablePeers().iterator().next();
@@ -366,10 +375,13 @@ public class Watchdog extends Service {
                             WifiP2pConfig config = new WifiP2pConfig();
                             config.deviceAddress = next;
 
+                            Log.d("Watchdog", "DISCOVERY -> TRANSMISSION (" + next + ")");
+
                             this.watchdogState = State.TRANSMISSION;
                             this.dropCurrentConnectionThenConnectTo(config);
                         } else {
                             /* No more targets to change state to. */
+                            Log.d("Watchdog", "DISCOVERY -> DOCKED");
                             this.watchdogState = State.DOCKED;
                             this.dropCurrentConnectionAndStartSearch();
                         }
@@ -377,6 +389,8 @@ public class Watchdog extends Service {
                         /* Continue with discovery. */
                         WifiP2pConfig config = new WifiP2pConfig();
                         config.deviceAddress = next;
+
+                        Log.d("Watchdog", "DISCOVERY # Connecting to next device: " + next);
 
                         this.watchdogState = State.DISCOVERY;
                         this.dropCurrentConnectionThenConnectTo(config);
@@ -389,15 +403,19 @@ public class Watchdog extends Service {
 
                     /* Advance the state machine. */
                     if(!this.router.getTargetedReachablePeers().iterator().hasNext()) {
+                        Log.d("Watchdog", "TRANSMISSION # Finished");
                         /* Try to change state to discovery. */
                         next = this.discoveryQueue.removeFirst();
                         if (next != null) {
                             WifiP2pConfig config = new WifiP2pConfig();
                             config.deviceAddress = next;
 
+                            Log.d("Watchdog", "TRANSMISSION -> DISCOVERY (" + next + ")");
+
                             this.watchdogState = State.DISCOVERY;
                             this.dropCurrentConnectionThenConnectTo(config);
                         } else {
+                            Log.d("Watchdog", "TRANSMISSION -> DOCKED");
                             /* No more targets to change state to. */
                             this.watchdogState = State.DOCKED;
                             this.dropCurrentConnectionAndStartSearch();
@@ -411,6 +429,8 @@ public class Watchdog extends Service {
 
                         WifiP2pConfig config = new WifiP2pConfig();
                         config.deviceAddress = next;
+
+                        Log.d("Watchdog", "DISCOVERY # Connecting to next device: " + next);
 
                         this.watchdogState = State.TRANSMISSION;
                         this.dropCurrentConnectionThenConnectTo(config);
@@ -435,6 +455,7 @@ public class Watchdog extends Service {
                         Watchdog.this.wifiChannel,
                         connection,
                         null);
+                    Log.d("Watchdog", "Requested connection to " + connection.deviceAddress);
                     return;
                 }
 
@@ -447,6 +468,8 @@ public class Watchdog extends Service {
                                 Watchdog.this.wifiChannel,
                                 connection,
                                 null);
+                            Log.d("Watchdog",
+                                "Dropped connection then requested connection to " + connection.deviceAddress);
                         },
                         () -> this.dropCurrentConnectionThenConnectTo(connection)
                     ));
@@ -463,6 +486,7 @@ public class Watchdog extends Service {
                     Watchdog.this.wifiManager.discoverPeers(
                         Watchdog.this.wifiChannel,
                         null);
+                    Log.d("Watchdog", "Started peer discovery");
                     return;
                 }
 
@@ -474,6 +498,7 @@ public class Watchdog extends Service {
                             Watchdog.this.wifiManager.discoverPeers(
                                 Watchdog.this.wifiChannel,
                                 null);
+                            Log.d("Watchdog", "Disconnected and started peer discovery");
                         },
                         this::dropCurrentConnectionAndStartSearch
                     ));
@@ -610,6 +635,25 @@ public class Watchdog extends Service {
 
             /* And send it to the router. */
             Watchdog.this.router.forward(p, Router.DEFAULT_TIME_TO_LIVE);
+
+            Log.d("Watchdog", "Current state: " + watchdogState);
+            Log.d("Watchdog", "Reachable peers: ");
+            for(Id peer : Watchdog.this.router.getReachablePeers())
+                Log.d("Watchdog", "    * " + peer);
+
+            if(watchdogState == State.DOCKED && Watchdog.this.router.getTargetedReachablePeers().size() > 0) {
+                Log.d("Watchdog", "Restarting the Watchdog cycle");
+                Id nextId = router.getTargetedReachablePeers().iterator().next();
+                String next = idToMac.get(nextId);
+                if(next == null)
+                    Assertions.fail("We are targeting a peer we don't know: %s", nextId);
+
+                WifiP2pConfig config = new WifiP2pConfig();
+                config.deviceAddress = next;
+
+                watchdogState = State.TRANSMISSION;
+                dropCurrentConnectionThenConnectTo(config);
+            }
         }
 
         /** Registers the given listener to listen for the event in which we

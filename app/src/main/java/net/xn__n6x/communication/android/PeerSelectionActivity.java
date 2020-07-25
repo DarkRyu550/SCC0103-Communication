@@ -15,6 +15,8 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
+import androidx.constraintlayout.widget.ConstraintLayout;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import net.xn__n6x.communication.R;
 import net.xn__n6x.communication.identity.Id;
@@ -39,6 +41,7 @@ public class PeerSelectionActivity extends AppCompatActivity {
         setContentView(R.layout.activity_peer_selection);
 
         this.peersView = Objects.requireNonNull(this.findViewById(R.id.peerList), "Kill me");
+        this.peersView.setLayoutManager(new LinearLayoutManager(this));
 
         /* Connect to the Watchdog. */
         Intent watchdog = new Intent(this, Watchdog.class);
@@ -61,10 +64,13 @@ public class PeerSelectionActivity extends AppCompatActivity {
     }
 
     protected void onPeerListChanged(HashSet<Id> peers) {
+        Log.d("PeerSelectionActivity", "The peer list changed to:");
+        for(Id peer : peers)
+            Log.d("PeerSelectionActivity", "    * " + peer);
         this.peersView.setAdapter(new PeerSetAdapter(peers));
     }
 
-    protected static class PeerSetAdapter extends RecyclerView.Adapter<PeerSetEntryHolder> {
+    protected class PeerSetAdapter extends RecyclerView.Adapter<PeerSetEntryHolder> {
         protected final ArrayList<Id> peers;
 
         public PeerSetAdapter(HashSet<Id> peers) {
@@ -85,6 +91,7 @@ public class PeerSelectionActivity extends AppCompatActivity {
         public void onBindViewHolder(@NonNull PeerSetEntryHolder holder, int position) {
             Id current = this.peers.get(position);
             holder.peerDisplayName.setText(current.toString());
+            holder.peerEntry.setOnClickListener(view -> startMessaging(current));
         }
         @Override
         public int getItemCount() {
@@ -92,13 +99,22 @@ public class PeerSelectionActivity extends AppCompatActivity {
         }
     }
 
+    protected void startMessaging(Id target) {
+        Intent start = new Intent(this, MessagingActivity.class);
+        start.putExtra(MessagingActivity.EXTRA_PEER_ID, target);
+
+        this.startActivity(start);
+    }
+
     protected static class PeerSetEntryHolder extends RecyclerView.ViewHolder {
         protected ImageView peerAvatar;
         protected TextView peerDisplayName;
+        protected ConstraintLayout peerEntry;
 
         public PeerSetEntryHolder(@NonNull View itemView) {
             super(itemView);
 
+            this.peerEntry = Objects.requireNonNull(itemView.findViewById(R.id.peerEntry), "Required view is null");
             this.peerAvatar = Objects.requireNonNull(itemView.findViewById(R.id.peerAvatar), "Required view is null");
             this.peerDisplayName = Objects.requireNonNull(itemView.findViewById(R.id.peerDisplayName), "Required view is null");
         }
