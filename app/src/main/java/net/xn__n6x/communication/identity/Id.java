@@ -74,7 +74,7 @@ public class Id implements Parcelable {
         try {
             Byte[] bytes = IntStream.range(0, source.length() / 2)
                 .mapToObj(i -> source.substring(i * 2, i * 2 + 2))
-                .map(b -> Byte.parseByte(b, 16))
+                .map(b -> (byte)Integer.parseInt(b, 16))
                 .toArray(Byte[]::new);
 
             if(bytes.length != ID_LENGTH)

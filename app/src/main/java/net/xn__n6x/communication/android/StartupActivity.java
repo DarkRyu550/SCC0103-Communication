@@ -1,23 +1,31 @@
 package net.xn__n6x.communication.android;
 
+import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.PermissionInfo;
 import android.net.wifi.p2p.WifiP2pManager;
 import android.util.Log;
 import android.widget.Toast;
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
+import androidx.core.content.ContextCompat;
 import net.xn__n6x.communication.Assertions;
 import net.xn__n6x.communication.R;
+import net.xn__n6x.communication.identity.Profile;
 
 import java.util.Optional;
 
 public class StartupActivity extends AppCompatActivity {
     /** ID of the request for enabling Bluetooth. */
     protected static final int REQUEST_ENABLE_BT = 1;
+    /** ID of the request for enabling fine device location. */
+    protected static final int REQUEST_ENABLE_FINE_LOCATION = 2;
 
     /** Maximum number of tasks in the task stack. */
     protected static final int TASK_STACK_LENGTH = 3;
@@ -45,10 +53,7 @@ public class StartupActivity extends AppCompatActivity {
         /* Make sure we have access to Bluetooth. */
         bluetoothManager = (BluetoothManager) this.getSystemService(Context.BLUETOOTH_SERVICE);
         if(bluetoothManager == null) {
-            Toast.makeText(this, R.string.bluetoothle_unavailable, Toast.LENGTH_LONG).show();
-            this.finish();
 
-            return;
         }
 
         /* Initialize the task stack with the task to run once both Bluetooth and Wifi P2P are available. */
@@ -61,17 +66,26 @@ public class StartupActivity extends AppCompatActivity {
             Optional<DeviceIdentity> identity = DeviceIdentity.load(this);
             if(!identity.isPresent()) {
                 /* Create a new identity for this device. */
+                DeviceIdentity.createWith(this, new Profile("Test"));
+                Log.d("StartupActivity", "Created new identity for this device");
 
+                taskStack[--this.taskNumber].run();
             } else taskStack[--this.taskNumber].run();
         };
 
-        /* Add the Bluetooth check to the task stack. */
+        /* Add the permission check to the task stack. */
         taskStack[this.taskNumber++] = () -> {
-            BluetoothAdapter bluetoothAdapter = bluetoothManager.getAdapter();
-            if (bluetoothManager.getAdapter() == null || !bluetoothAdapter.isEnabled()) {
-                Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
-                this.startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT);
-            } else taskStack[--this.taskNumber].run();
+            switch(ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)) {
+                case PackageManager.PERMISSION_GRANTED:
+                    /* Move on. */
+                    taskStack[--this.taskNumber].run();
+                    break;
+                case PackageManager.PERMISSION_DENIED:
+                    /* Request the permission. */
+                    this.requestPermissions(
+                        new String[] { Manifest.permission.ACCESS_FINE_LOCATION },
+                        REQUEST_ENABLE_FINE_LOCATION);
+            }
         };
 
         /* Run the first task. */
@@ -80,27 +94,30 @@ public class StartupActivity extends AppCompatActivity {
 
     /** Runs the startup code once all requirements have been fulfilled. */
     protected void start() {
-        BluetoothAdapter adapter = bluetoothManager.getAdapter();
-        Assertions.debugAssertDiffers(adapter, null);
-
-        Log.d("StartupActivity", "Bluetooth LE capabilities:");
-        Log.d("StartupActivity", "    * isLe2MPhySupported()               " + adapter.isLe2MPhySupported());
-        Log.d("StartupActivity", "    * isLeCodedPhySupported()            " + adapter.isLeCodedPhySupported());
-        Log.d("StartupActivity", "    * isLeExtendedAdvertisingSupported() " + adapter.isLeExtendedAdvertisingSupported());
-        Log.d("StartupActivity", "    * isLePeriodicAdvertisingSupported() " + adapter.isLePeriodicAdvertisingSupported());
+        Log.d("StartupActivity", "All seems right. Starting up the main activity");
+        Intent intent = new Intent(this, PeerSelectionActivity.class);
+        this.startActivity(intent);
+        this.finish();
     }
 
+    /** Oh, Android. */
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        switch(requestCode) {
-            case REQUEST_ENABLE_BT:
-                if(resultCode == RESULT_OK)
-                    taskStack[--this.taskNumber].run();
-                else {
-                    Toast.makeText(this, R.string.bluetoothle_unavailable, Toast.LENGTH_LONG).show();
-                    this.finish();
-                }
+    public void onRequestPermissionsResult(
+        int requestCode,
+        @NonNull String[] permissions,
+        @NonNull int[] grantResults) {
+
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if(requestCode == REQUEST_ENABLE_FINE_LOCATION) {
+            if(grantResults.length < 1)
+                Assertions.fail("onRequestPermissionResult got called with an invalid result list");
+            if(grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, R.string.permissions_unavailable, Toast.LENGTH_LONG).show();
+                this.finish();
+            } else {
+                /* Move on to the next task. */
+                this.taskStack[--this.taskNumber].run();
+            }
         }
     }
 }

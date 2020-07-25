@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="net.xn__n6x.communication">
+
     <!-- Required for Wifi P2P. -->
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
-    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/> <!-- Required for Bluetooth LE. -->
-    <uses-permission android:name="android.permission.BLUETOOTH"/>
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>      <!-- Normal     -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>      <!-- Normal     -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>   <!-- Dangerous  -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>   <!-- Normal     -->
+    <uses-permission android:name="android.permission.INTERNET"/>               <!-- Normal     -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>   <!-- Normal     -->
 
     <uses-feature
             android:name="android.hardware.bluetooth_le"

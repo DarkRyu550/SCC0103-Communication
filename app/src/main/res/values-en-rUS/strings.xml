@@ -4,7 +4,7 @@
     <string name="identity_name">Name</string>
     <string name="identity_name_description">The name other users will know you by.</string>
     <string name="wifip2p_unavailable">WiFi P2P is required, but unavailable.</string>
-    <string name="bluetoothle_unavailable">Bluetooth LE is required, but unavailable.</string>
+    <string name="permissions_unavailable">Required permissions are not available.</string>
     <string name="name">Name</string>
     <string name="message">Message</string>
     <string name="send">Send</string>

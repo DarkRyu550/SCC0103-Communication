@@ -1,7 +1,6 @@
 package net.xn__n6x.communication.watchdog;
 
 import android.app.Service;
-import android.bluetooth.BluetoothManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -22,6 +21,10 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -40,8 +43,6 @@ public class Watchdog extends Service {
     protected WifiP2pManager wifiManager;
     /** The Wifi P2P channel we are operating in. */
     protected WifiP2pManager.Channel wifiChannel;
-    /** The manager for our Bluetooth state. */
-    protected BluetoothManager bluetoothManager;
     /** Our identity. */
     protected DeviceIdentity identity;
     /** The router managing our known peers. */
@@ -64,6 +65,8 @@ public class Watchdog extends Service {
     protected HashMap<Id, ArrayList<OnMessage>> inboundListeners;
     /** Listeners for onFinishedDiscovery events. */
     protected ArrayList<OnFinishedDiscovery> finishedDiscoveryListeners;
+    /** Executor for network tasks. */
+    protected ExecutorService executor;
 
     /** Because Wifi P2P is used for both discovery and data transmission
      * operations, and because we can't interleave these operations, we
@@ -121,6 +124,7 @@ public class Watchdog extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        Log.i("Watchdog", "Starting the Watchdog");
 
         /* Make sure we have access to Wifi P2P. */
         this.wifiManager = (WifiP2pManager) this.getSystemService(Context.WIFI_P2P_SERVICE);
@@ -130,20 +134,15 @@ public class Watchdog extends Service {
 
             return;
         }
-        this.wifiManager.initialize(this, getMainLooper(), null);
+        this.wifiChannel = this.wifiManager.initialize(this, getMainLooper(), null);
 
-        /* Make sure we have access to Bluetooth. */
-        this.bluetoothManager = (BluetoothManager) this.getSystemService(Context.BLUETOOTH_SERVICE);
-        if(this.bluetoothManager == null) {
-            Toast.makeText(this, R.string.bluetoothle_unavailable, Toast.LENGTH_LONG).show();
-            this.stopSelf();
-
-            return;
-        }
+        Log.d("Watchdog", "We have Wifi P2P");
 
         /* Load our identity. */
         this.identity = DeviceIdentity.load(this)
             .orElseThrow(() -> new RuntimeException("Expected a valid identity."));
+        Log.d("Watchdog", "Our ID is:   " + this.identity.getId());
+        Log.d("Watchdog", "Our name is: " + this.identity.getName());
 
         /* Initialize ourselves. */
         this.router = new Router(this.identity.getId());
@@ -153,8 +152,10 @@ public class Watchdog extends Service {
         this.inboundQueue = new HashMap<>();
         this.inboundListeners = new HashMap<>();
         this.finishedDiscoveryListeners = new ArrayList<>();
+        this.executor = Executors.newWorkStealingPool();
         try {
             this.watchdogServer = new ServerSocket(Watchdog.TCP_PORT);
+            Log.d("Watchdog", "Bound Watchdog server to " + this.watchdogServer.getInetAddress());
         } catch (IOException e) {
             e.printStackTrace();
 
@@ -162,8 +163,9 @@ public class Watchdog extends Service {
             return;
         }
 
-        /* Start ourselves docked. */
+        /* Start ourselves docked and drop any connections. */
         this.watchdogState = State.DOCKED;
+        this.dropCurrentConnectionAndStartSearch();
 
         /* Register the broadcast handler. */
         IntentFilter filter = new IntentFilter();
@@ -172,6 +174,8 @@ public class Watchdog extends Service {
         filter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION);
         filter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION);
         this.registerReceiver(new BroadcastHandler(), filter);
+
+        Log.i("Watchdog", "Successful started the Watchdog service");
     }
 
     @Override
@@ -182,9 +186,15 @@ public class Watchdog extends Service {
 
     protected void onPeersChanged(WifiP2pDeviceList list) {
         Collection<WifiP2pDevice> devices = list.getDeviceList();
+        Log.d("Watchdog", "A P2P search has revealed " + devices.size() + " peers");
         devices.stream()
             .filter(t -> !this.macToId.containsKey(t.deviceAddress))
+            .filter(t -> !this.discoveryQueue.contains(t.deviceAddress)) /* Ugly */
             .forEach(t -> this.discoveryQueue.addLast(t.deviceAddress));
+
+        Log.d("Watchdog", "The discovery queue looks like: ");
+        for(String address : this.discoveryQueue)
+            Log.d("Watchdog", "    * " + address);
 
         /* Trim all the devices we can't communicate to from the router. */
         ArrayList<Id> reachable = devices.stream()
@@ -199,6 +209,7 @@ public class Watchdog extends Service {
             WifiP2pConfig config = new WifiP2pConfig();
             config.deviceAddress = this.discoveryQueue.removeFirst();
 
+            Log.d("Watchdog", "Connecting to device " + config.deviceAddress);
             this.watchdogState = State.DISCOVERY;
             this.wifiManager.connect(
                 this.wifiChannel,
@@ -228,55 +239,82 @@ public class Watchdog extends Service {
         }
     }
 
-    protected void onTransmissionConnectionToPeer(Socket peer) throws WatchdogException, IOException {
-        WatchdogProtocol proto = new WatchdogProtocol(peer);
-        proto.sendMagic();
-        proto.sendId(this.identity.getId());
-        proto.sendString(this.macAddress);
+    protected void onTransmissionConnectionToPeer(Socket peer)
+        throws WatchdogException, ExecutionException, InterruptedException {
 
-        Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
+        this.executor.submit(() -> {
+            try {
+                WatchdogProtocol proto = new WatchdogProtocol(peer);
+                proto.sendMagic();
+                proto.sendId(this.identity.getId());
+                proto.sendString(this.macAddress);
 
-        proto.getValidMagic().orElseThrow(missing);
-        Id other = proto.getId().orElseThrow(missing);
-        proto.getString().orElseThrow(missing);
+                Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
 
-        /* Send all of the packets we have queued for this peer. */
-        ArrayList<Packet> packets = new ArrayList<>();
-        for(
-            Optional<Packet> p = this.router.getNextMessageForPeer(other);
-            p.isPresent();
-            p = this.router.getNextMessageForPeer(other)) {
+                proto.getValidMagic().orElseThrow(missing);
+                Id other = proto.getId().orElseThrow(missing);
+                proto.getString().orElseThrow(missing);
 
-            packets.add(p.get());
-        }
+                /* Send all of the packets we have queued for this peer. */
+                ArrayList<Packet> packets = new ArrayList<>();
+                for (
+                    Optional<Packet> p = this.router.getNextMessageForPeer(other);
+                    p.isPresent();
+                    p = this.router.getNextMessageForPeer(other)) {
 
-        proto.sendInt(packets.size());
-        for(Packet p : packets)
-            proto.sendPacket(p.tag(other));
+                    packets.add(p.get());
+                }
 
-        /* Receive all the inbound packets from this peer. */
-        int inbound = proto.getInt().orElseThrow(missing);
-        for(int i = 0; i < inbound; ++i)
-            this.onPacketReceived(proto.getValidPacket().orElseThrow(missing));
+                proto.sendInt(packets.size());
+                for (Packet p : packets)
+                    proto.sendPacket(p.tag(other));
+
+                /* Receive all the inbound packets from this peer. */
+                int inbound = proto.getInt().orElseThrow(missing);
+                for (int i = 0; i < inbound; ++i)
+                    this.onPacketReceived(proto.getValidPacket().orElseThrow(missing));
+
+                return new PeerExchangeResult(null, 0);
+            } catch(IOException e) {
+                return new PeerExchangeResult(new WatchdogException(e), 0);
+            } catch(WatchdogException e) {
+                return new PeerExchangeResult(e, 0);
+            }
+        }).get().unwrap();
     }
 
-    protected void onDiscoveryConnectionToPeer(Socket peer) throws WatchdogException, IOException {
-        WatchdogProtocol proto = new WatchdogProtocol(peer);
-        proto.sendMagic();
-        proto.sendId(this.identity.getId());
-        proto.sendString(this.macAddress);
+    protected void onDiscoveryConnectionToPeer(Socket peer)
+        throws WatchdogException, ExecutionException, InterruptedException {
 
-        Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
+        this.executor.submit(() -> {
+            try {
+                WatchdogProtocol proto = new WatchdogProtocol(peer);
+                proto.sendMagic();
+                proto.sendId(this.identity.getId());
+                proto.sendString(this.macAddress);
 
-        proto.getValidMagic().orElseThrow(missing);
-        Id other   = proto.getId().orElseThrow(missing);
-        String mac = proto.getString().orElseThrow(missing);
+                Supplier<WatchdogException> missing = () -> new WatchdogException("Missing required element");
 
-        /* Haha pseudo-bidimap go brrrrrr. */
-        this.idToMac.put(other, mac);
-        this.macToId.put(mac, other);
+                proto.getValidMagic().orElseThrow(missing);
+                Id other = proto.getId().orElseThrow(missing);
+                String mac = proto.getString().orElseThrow(missing);
 
-        this.router.register(other);
+                Log.d("Watchdog", "Exchanged discovery data with peer");
+                Log.d("Watchdog", "    * Their ID:  " + other.toString());
+                Log.d("Watchdog", "    * Their MAC: " + mac);
+
+                /* Haha pseudo-bidimap go brrrrrr. */
+                this.idToMac.put(other, mac);
+                this.macToId.put(mac, other);
+
+                this.router.register(other);
+                return new PeerExchangeResult(null, 0);
+            } catch(IOException e) {
+                return new PeerExchangeResult(new WatchdogException(e), 0);
+            } catch(WatchdogException e) {
+                return new PeerExchangeResult(e, 0);
+            }
+        }).get().unwrap();
     }
 
     protected void onConnectionChanged(WifiP2pInfo info) {
@@ -286,19 +324,28 @@ public class Watchdog extends Service {
         }
 
         try {
-            Socket peer;
-            if (info.isGroupOwner) {
-                /* Expect a connection to our server. */
-                peer = this.watchdogServer.accept();
-            } else {
-                /* Connect to the group owner. */
-                peer = new Socket();
-                peer.connect(new InetSocketAddress(info.groupOwnerAddress, TCP_PORT));
-            }
+            Socket peer = this.executor.submit(() -> {
+                Socket p;
+                try {
+                    if (info.isGroupOwner) {
+                        /* Expect a connection to our server. */
+                        p = this.watchdogServer.accept();
+                    } else {
+                        /* Connect to the group owner. */
+                        p = new Socket();
+                        p.connect(new InetSocketAddress(info.groupOwnerAddress, TCP_PORT));
+                    }
+                    return new PeerConnectionResult(null, p);
+                } catch(IOException e) {
+                    return new PeerConnectionResult(e, null);
+                }
+            }).get().unwrap();
+            Log.d("Watchdog", "Connected to peer at: " + peer.getInetAddress());
 
             switch(this.watchdogState) {
                 case DISCOVERY:
                     this.onDiscoveryConnectionToPeer(peer);
+                    peer.close();
 
                     /* Advance the state machine. */
                     String next = this.discoveryQueue.removeFirst();
@@ -321,9 +368,11 @@ public class Watchdog extends Service {
 
                             this.watchdogState = State.TRANSMISSION;
                             this.dropCurrentConnectionThenConnectTo(config);
-                        } else
+                        } else {
                             /* No more targets to change state to. */
                             this.watchdogState = State.DOCKED;
+                            this.dropCurrentConnectionAndStartSearch();
+                        }
                     } else {
                         /* Continue with discovery. */
                         WifiP2pConfig config = new WifiP2pConfig();
@@ -336,6 +385,7 @@ public class Watchdog extends Service {
                     break;
                 case TRANSMISSION:
                     this.onTransmissionConnectionToPeer(peer);
+                    peer.close();
 
                     /* Advance the state machine. */
                     if(!this.router.getTargetedReachablePeers().iterator().hasNext()) {
@@ -347,9 +397,11 @@ public class Watchdog extends Service {
 
                             this.watchdogState = State.DISCOVERY;
                             this.dropCurrentConnectionThenConnectTo(config);
-                        } else
+                        } else {
                             /* No more targets to change state to. */
                             this.watchdogState = State.DOCKED;
+                            this.dropCurrentConnectionAndStartSearch();
+                        }
                     } else {
                         /* Continue with transmission. */
                         Id nextId = this.router.getTargetedReachablePeers().iterator().next();
@@ -363,34 +415,96 @@ public class Watchdog extends Service {
                         this.watchdogState = State.TRANSMISSION;
                         this.dropCurrentConnectionThenConnectTo(config);
                     }
+                case DOCKED:
+                    Assertions.fail("Connected to a peer while docked.");
             }
-        } catch(IOException | WatchdogException e) {
+        } catch(IOException | WatchdogException | InterruptedException | ExecutionException e) {
             e.printStackTrace();
             this.stopSelf();
         }
     }
 
     protected void dropCurrentConnectionThenConnectTo(WifiP2pConfig connection) {
-        this.wifiManager.removeGroup(this.wifiChannel, new WifiP2pManager.ActionListener() {
+        this.wifiManager.requestGroupInfo(
+            this.wifiChannel,
+            info -> {
+                /* We don't need to disconnect when we aren't connected. */
+                if(info == null) {
+                    /* Connect to the next handler. */
+                    Watchdog.this.wifiManager.connect(
+                        Watchdog.this.wifiChannel,
+                        connection,
+                        null);
+                    return;
+                }
+
+                this.wifiManager.removeGroup(
+                    this.wifiChannel,
+                    this.dropConnectionHandler(
+                        () -> {
+                            /* Connect to the next handler. */
+                            Watchdog.this.wifiManager.connect(
+                                Watchdog.this.wifiChannel,
+                                connection,
+                                null);
+                        },
+                        () -> this.dropCurrentConnectionThenConnectTo(connection)
+                    ));
+            });
+    }
+
+    protected void dropCurrentConnectionAndStartSearch() {
+        this.wifiManager.requestGroupInfo(
+            this.wifiChannel,
+            info -> {
+                /* We don't need to disconnect when we aren't connected. */
+                if(info == null) {
+                    /* Fire another search, so that we don't run out of events. */
+                    Watchdog.this.wifiManager.discoverPeers(
+                        Watchdog.this.wifiChannel,
+                        null);
+                    return;
+                }
+
+                this.wifiManager.removeGroup(
+                    this.wifiChannel,
+                    this.dropConnectionHandler(
+                        () -> {
+                            /* Fire another search, so that we don't run out of events. */
+                            Watchdog.this.wifiManager.discoverPeers(
+                                Watchdog.this.wifiChannel,
+                                null);
+                        },
+                        this::dropCurrentConnectionAndStartSearch
+                    ));
+            });
+    }
+
+    protected WifiP2pManager.ActionListener dropConnectionHandler(Runnable follow, Runnable retry) {
+        return new WifiP2pManager.ActionListener() {
             @Override
             public void onSuccess() {
-                Watchdog.this.wifiManager.connect(
-                    Watchdog.this.wifiChannel,
-                    connection,
-                    null);
+                follow.run();
             }
 
             @Override
             public void onFailure(int reason) {
-                Log.w("Watchdog", "Could not disconnect due to: " + reason);
-                Log.w("Watchdog", "Connecting to next peer anyway.");
-
-                Watchdog.this.wifiManager.connect(
-                    Watchdog.this.wifiChannel,
-                    connection,
-                    null);
+                switch(reason) {
+                    case WifiP2pManager.ERROR:
+                        /* Internal error. */
+                        Assertions.fail("Android has reported an internal error in the Wifi P2P interface.");
+                        break;
+                    case WifiP2pManager.BUSY:
+                        /* Busy, we should try again. */
+                        Log.w("Watchdog", "Dropping the connection has returned BUSY, retrying");
+                        retry.run();
+                        break;
+                    case WifiP2pManager.P2P_UNSUPPORTED:
+                        /* Wifi P2P is not supported. */
+                        Assertions.fail("Wifi P2P not supported. This should not be reachable.");
+                }
             }
-        });
+        };
     }
 
     protected class BroadcastHandler extends BroadcastReceiver {
@@ -408,10 +522,12 @@ public class Watchdog extends Service {
                         case WifiP2pManager.WIFI_P2P_STATE_ENABLED:
                             /* Indicate this somehow, I guess? Android is a
                              * mess. */
+                            /*Log.d("Watchdog", "Wifi P2P is enabled");*/
                             break;
                         case WifiP2pManager.WIFI_P2P_STATE_DISABLED:
                             /* There's no point in running when we can't even
                              * talk to anyone anymore, just stop ourselves. */
+                            Log.e("Watchdog", "Wifi P2P has been disabled, just stop");
                             Watchdog.this.stopSelf();
                             break;
                         default:
@@ -424,6 +540,7 @@ public class Watchdog extends Service {
                     break;
                 case WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION:
                     /* Our peer list has been changed. */
+                    Log.d("Watchdog", "Our list of Wifi P2P peers has changed");
                     Watchdog.this.wifiManager.requestPeers(
                         Watchdog.this.wifiChannel,
                         Watchdog.this::onPeersChanged);
@@ -448,6 +565,8 @@ public class Watchdog extends Service {
                     if(device == null)
                         Assertions.fail("The EXTRA_WIFI_P2P_DEVICE parcelable is null");
                     Watchdog.this.macAddress = device.deviceAddress;
+                    Log.d("Watchdog",
+                        "Android has graced us with our MAC address: " + Watchdog.this.macAddress);
 
                     break;
             }
@@ -529,5 +648,39 @@ public class Watchdog extends Service {
          *                  reachable at the end of discovery.
          */
         void onFinishedDiscovery(HashSet<Id> reachable);
+    }
+
+    /** Result between peer exchanges. */
+    protected static class PeerExchangeResult {
+        protected final WatchdogException exception;
+        protected final int value;
+
+        protected PeerExchangeResult(WatchdogException exception, int value) {
+            this.exception = exception;
+            this.value = value;
+        }
+
+        public int unwrap() throws WatchdogException {
+            if(exception != null)
+                throw exception;
+            else return value;
+        }
+    }
+
+    /** Result for peer connections. */
+    protected static class PeerConnectionResult {
+        protected final IOException exception;
+        protected final Socket socket;
+
+        protected PeerConnectionResult(IOException exception, Socket value) {
+            this.exception = exception;
+            this.socket = value;
+        }
+
+        public Socket unwrap() throws IOException {
+            if(exception != null)
+                throw exception;
+            else return socket;
+        }
     }
 }

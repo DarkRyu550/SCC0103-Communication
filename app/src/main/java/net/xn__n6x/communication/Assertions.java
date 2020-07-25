@@ -30,15 +30,15 @@ public final class Assertions {
         }
     }
 
-    /** If this project is in debug mode, throws an exception when the result of
+    /** Throws an exception when the result of
      * calling {@code lhs.equals(rhs)} is equal to true. Does nothing if the
      * project is not is debug mode.
      * @param lhs The value in the left hand side.
      * @param rhs The value in the right hand side.
      * @param <A> The type of the values being compared.
      */
-    public static <A> void debugAssertDiffers(A lhs, A rhs) {
-        if(BuildConfig.DEBUG && lhs.equals(rhs)) {
+    public static <A> void assertDiffers(A lhs, A rhs) {
+        if(lhs.equals(rhs)) {
             String message = String.format(
                 "Inequality condition failed: (lhs == rhs) lhs <- %s, rhs <- %s",
                 lhs, rhs);

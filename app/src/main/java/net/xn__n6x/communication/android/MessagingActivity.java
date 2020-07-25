@@ -21,6 +21,7 @@ import net.xn__n6x.communication.watchdog.Watchdog;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.Optional;
 
 public class MessagingActivity extends AppCompatActivity {
@@ -48,9 +49,9 @@ public class MessagingActivity extends AppCompatActivity {
         this.messages = new ArrayList<>();
 
         /* Get the user interface structures. */
-        this.msgView = requireViewById(R.id.messages);
-        this.send    = requireViewById(R.id.sendButton);
-        this.input   = requireViewById(R.id.messageInput);
+        this.msgView = Objects.requireNonNull(findViewById(R.id.messages), "Required view is null");
+        this.send    = Objects.requireNonNull(findViewById(R.id.sendButton), "Required view is null");
+        this.input   = Objects.requireNonNull(findViewById(R.id.messageInput), "Required view is null");
 
         /* Get our target Id. */
         Bundle extras = this.getIntent().getExtras();
@@ -104,9 +105,7 @@ public class MessagingActivity extends AppCompatActivity {
         }
 
         /* Get the text in the text box and clear it. */
-        byte[] data = StandardCharsets.UTF_8
-            .encode(this.input.getText().toString())
-            .array();
+        byte[] data = this.input.getText().toString().getBytes(StandardCharsets.UTF_8);
         this.input.setText("");
 
         /* Send it out. */
