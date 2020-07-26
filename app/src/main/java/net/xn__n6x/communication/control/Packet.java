@@ -5,6 +5,7 @@ import net.xn__n6x.communication.identity.Id;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -90,5 +91,28 @@ public class Packet {
 
     public byte[] getPayload() {
         return payload;
+    }
+
+    public Id[] getRoute() {
+        return route;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Packet packet = (Packet) o;
+        return Objects.equals(source, packet.source) &&
+            Arrays.equals(route, packet.route) &&
+            Objects.equals(target, packet.target) &&
+            Arrays.equals(payload, packet.payload);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = Objects.hash(source, target);
+        result = 31 * result + Arrays.hashCode(route);
+        result = 31 * result + Arrays.hashCode(payload);
+        return result;
     }
 }

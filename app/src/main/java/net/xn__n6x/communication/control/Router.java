@@ -31,28 +31,6 @@ public class Router {
         this.packetCache = new ArrayDeque<>();
     }
 
-//    /** Queries whether there is a message that hasn't yet expired waiting to be sent to the peer
-//     * with the given {@link Id}. Note that this is a hint, and in case of {@code true} the return
-//     * value of {@link Router#getNextMessageForPeer(Id)} is still not guaranteed to have a value.
-//     * <br><br>
-//     * This happens because a message may still expire between calls to this function and subsequent
-//     * calls to {@link Router#getNextMessageForPeer(Id)}. This function will remove every element in
-//     * the queue that has already expired.
-//     *
-//     * @param peer The peer whose queue is to be checked.
-//     * @return Whether there may still be any valid messages in queue for this peer.
-//     */
-//    public boolean hasNextMessageForPeer(Id peer) {
-//        PacketQueue queue = this.packetQueueSet.get(peer);
-//        if(queue == null) return false;
-//
-//        /* Trim all expired packets. */
-//        queue.removeIf(QueuedPacket::expired);
-//
-//        /* Just check if we have anything at the head. */
-//        return queue.peek() != null;
-//    }
-
     /** Queries the first {@link Packet} queued up for the peer with the given {@link Id} that has
      * not yet expired. This function will remove every element in the queue that has already
      * expired.
@@ -136,15 +114,6 @@ public class Router {
             queue.enqueueIfNew(p, timeToLive);
         }
     }
-
-//    /** Signal the sending of a packet has failed, and that it should be retired.
-//     * @param p The packet whose sending has failed.
-//     * @param failed The {@link Id}
-//     */
-//    public void retry(Packet p, Id failed) {
-//        if(this.reachablePeers.contains(failed))
-//            this.
-//    }
 
     protected static class PacketQueue {
         /** The packets currently waiting, in queue order. */
